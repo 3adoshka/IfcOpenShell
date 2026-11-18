@@ -373,52 +373,99 @@ def get_quantities(
                     "class": data["type"],
                     "value": results[quantity_name],
                 }
-    return results
-
-
-@overload
-def get_property(properties: list[ifcopenshell.entity_instance], name: str, verbose: Literal[False] = False) -> Any: ...
 @overload
 def get_property(
-    properties: list[ifcopenshell.entity_instance], name: str, verbose: Literal[True]
+    element: ifcopenshell.entity_instance,
+    pset_name: str,
+    prop_name: str,
+    default: Any = None,
+) -> Any: ...
+
+@overload
+def get_property(
+    properties: list[ifcopenshell.entity_instance],
+    name: str,
+    verbose: Literal[False] = False,
+    default: Any = None,
+) -> Any: ...
+
+@overload
+def get_property(
+    properties: list[ifcopenshell.entity_instance],
+    name: str,
+    verbose: Literal[True],
+    default: Any = None,
 ) -> dict[str, Any]: ...
+
 def get_property(
-    properties: list[ifcopenshell.entity_instance], name: str, verbose=False
-) -> Union[Any, dict[str, Any]]:
-    for prop in properties or []:
-        if prop.Name != name:
-            continue
-        is_single_value = False  # For now we pass value type only for single values.
-        result_type = None
-        if prop.is_a("IfcPropertySingleValue"):
-            # 2 IfcPropertySingleValue.NominalValue
-            result = v.wrappedValue if (v := prop[2]) else None
-            result_type = v.is_a() if v else None
-            is_single_value = True
-        elif prop.is_a("IfcPropertyEnumeratedValue"):
-            # 2 IfcPropertyEnumeratedValue.EnumerationValues
-            result = [v.wrappedValue for v in values] if (values := prop[2]) else None
-        elif prop.is_a("IfcPropertyListValue"):
-            # 2 IfcPropertyListValue.ListValues
-            result = [v.wrappedValue for v in values] if (values := prop[2]) else None
-        elif prop.is_a("IfcPropertyBoundedValue"):
-            data = prop.get_info()
-            del data["Unit"]
-            result = data
-        elif prop.is_a("IfcPropertyTableValue"):
-            result = prop.get_info()
-        elif prop.is_a("IfcComplexProperty"):
-            data = {k: v for k, v in prop.get_info().items() if v is not None and k != "Name"}
-            data["properties"] = get_properties(prop.HasProperties, verbose=verbose)
-            del data["HasProperties"]
-            result = data
-        else:
-            assert False, prop
-        if verbose:
-            result = {"id": prop.id(), "class": prop.is_a(), "value": result}
-            if is_single_value:
-                result["value_type"] = result_type
-        return result
+    element_or_properties: Union[ifcopenshell.entity_instance, list[ifcopenshell.entity_instance]],
+    pset_or_name: str,
+    prop_name_or_verbose: Union[str, bool] = False,
+    default: Any = None,
+) -> Any:
+    """
+    Retrieve a property value from an element's property set or from a list of properties.
+    """
+    # Case 1: Called with a list of properties
+    if isinstance(element_or_properties, list):
+        properties = element_or_properties
+        name = pset_or_name
+        verbose = bool(prop_name_or_verbose)
+        
+        for prop in properties or []:
+            if getattr(prop, "Name", None) != name:
+                continue
+            is_single_value = False
+            result_type = None
+            
+            if prop.is_a("IfcPropertySingleValue"):
+                result = v.wrappedValue if (v := prop[2]) else None
+                result_type = v.is_a() if v else None
+                is_single_value = True
+            elif prop.is_a("IfcPropertyEnumeratedValue"):
+                result = [v.wrappedValue for v in values] if (values := prop[2]) else None
+            elif prop.is_a("IfcPropertyListValue"):
+                result = [v.wrappedValue for v in values] if (values := prop[2]) else None
+            elif prop.is_a("IfcPropertyBoundedValue"):
+                data = prop.get_info()
+                if "Unit" in data:
+                    del data["Unit"]
+                result = data
+            elif prop.is_a("IfcPropertyTableValue"):
+                result = prop.get_info()
+            elif prop.is_a("IfcComplexProperty"):
+                data = {k: v for k, v in prop.get_info().items() if v is not None and k != "Name"}
+                data["properties"] = get_properties(prop.HasProperties, verbose=verbose)
+                if "HasProperties" in data:
+                    del data["HasProperties"]
+                result = data
+            else:
+                assert False, prop
+                
+            if verbose:
+                result = {"id": prop.id(), "class": prop.is_a(), "value": result}
+                if is_single_value:
+                    result["value_type"] = result_type
+            return result
+        return default
+
+    # Case 2: Called with an element, pset_name, and prop_name (Element API)
+    element = element_or_properties
+    pset_name = pset_or_name
+    prop_name = prop_name_or_verbose if isinstance(prop_name_or_verbose, str) else None
+    
+    if not prop_name:
+        return default
+
+    pset = get_pset(element, pset_name)
+    if not pset:
+        return default
+    
+    try:
+        val = pset.get(prop_name)
+        return val if val is not None else default
+    except AttributeError:
+        return default
 
 
 @overload
@@ -437,7 +484,6 @@ def get_properties(
         ifc_class = prop.is_a()
         prop_name = prop[0]  # 0 IfcProperty.Name
         if ifc_class == "IfcPropertySingleValue":
-            # 2 IfcPropertySingleValue.NominalValue
             results[prop_name] = v.wrappedValue if (v := prop[2]) else None
             if verbose:
                 results[prop_name] = {
@@ -447,7 +493,6 @@ def get_properties(
                     "value_type": v.is_a() if v else None,
                 }
         elif ifc_class == "IfcPropertyEnumeratedValue":
-            # 2 IfcPropertyEnumeratedValue.EnumerationValues
             results[prop_name] = [v.wrappedValue for v in values] if (values := prop[2]) else None
             if verbose:
                 results[prop_name] = {
@@ -455,41 +500,6 @@ def get_properties(
                     "class": prop.is_a(),
                     "value": results[prop_name],
                 }
-        elif ifc_class == "IfcPropertyListValue":
-            # 2 IfcPropertyListValue.ListValues
-            results[prop_name] = [v.wrappedValue for v in values] if (values := prop[2]) else None
-            if verbose:
-                results[prop_name] = {
-                    "id": prop.id(),
-                    "class": prop.is_a(),
-                    "value": results[prop_name],
-                }
-        elif ifc_class == "IfcPropertyBoundedValue":
-            data = prop.get_info()
-            del data["Unit"]
-            results[prop_name] = data
-            if verbose:
-                results[prop_name] = {
-                    "id": data["id"],
-                    "class": data["type"],
-                    "value": results[prop_name],
-                }
-        elif ifc_class == "IfcPropertyTableValue":
-            data = prop.get_info()
-            results[prop_name] = data
-            if verbose:
-                results[prop_name] = {
-                    "id": data["id"],
-                    "class": data["type"],
-                    "value": results[prop_name],
-                }
-        elif ifc_class == "IfcComplexProperty":
-            data = {k: v for k, v in prop.get_info().items() if v is not None and k != "Name"}
-            data["properties"] = get_properties(prop.HasProperties, verbose=verbose)
-            del data["HasProperties"]
-            results[prop_name] = data
-            if verbose:
-                results[prop_name] = {"id": data["id"], "class": data["type"], "value": results[prop_name]}
     return results
 
 
